@@ -1,0 +1,85 @@
+{
+  "input": "/tmp/tmpzl755l2w/hits.parquet",
+  "time_column": "OrderedCell0Time",
+  "diagnostics": {
+    "total_hits": 2,
+    "selected_hits": 0,
+    "backward_steps": 0,
+    "largest_backward_step_ns": 0.0,
+    "max_stored_float_spacing_ps": 1.4210854715202004e-11
+  },
+  "settings": {
+    "baseline_window": [
+      0,
+      3
+    ],
+    "signal_window": [
+      3,
+      10
+    ],
+    "polarity": "positive",
+    "sample_period_ns": 0.5,
+    "cfd_percent": 50,
+    "window_ns": 30,
+    "bin_width_ns": 0.019999999999999574,
+    "fit_window_ns": 1,
+    "sigma_max_ns": 0.5,
+    "min_counts": 50,
+    "min_amplitude_V": 5,
+    "min_snr": 0
+  },
+  "valid_hits_per_channel": {
+    "0": 0,
+    "1": 0,
+    "2": 0
+  },
+  "pairs": [
+    {
+      "first": 0,
+      "second": 1,
+      "entries": 0,
+      "fit": null,
+      "pair_resolution_ps": null,
+      "pair_resolution_error_ps": null,
+      "corrected_mean_ns": null
+    },
+    {
+      "first": 0,
+      "second": 2,
+      "entries": 0,
+      "fit": null,
+      "pair_resolution_ps": null,
+      "pair_resolution_error_ps": null,
+      "corrected_mean_ns": null
+    },
+    {
+      "first": 1,
+      "second": 2,
+      "entries": 0,
+      "fit": null,
+      "pair_resolution_ps": null,
+      "pair_resolution_error_ps": null,
+      "corrected_mean_ns": null
+    }
+  ],
+  "calibration": {
+    "delays_ns": {
+      "0": 0.0,
+      "1": null,
+      "2": null
+    },
+    "errors_ns": {
+      "0": 0.0,
+      "1": null,
+      "2": null
+    },
+    "reference_channel": 0,
+    "chi2": null,
+    "ndof": 0,
+    "residuals": []
+  },
+  "correction": "corrected_time = first_sample_time + CFD_offset - delay_ns",
+  "matching": "Each second-channel hit assigned to nearest first-channel CFD hit; pivot reuse allowed.",
+  "resolution": "Reported sigma is the pair width. Divide by sqrt(2) only for equal independent detectors.",
+  "validation": "Corrected means are in-sample closure diagnostics; offsets do not change individual pair widths."
+}

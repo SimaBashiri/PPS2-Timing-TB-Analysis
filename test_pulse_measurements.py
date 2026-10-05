@@ -58,6 +58,33 @@ class PulseMeasurementsTest(unittest.TestCase):
         self.assertAlmostEqual(f["FWHM"][0], 0.5)
         self.assertEqual(f["Multiple50pctExcursions"][0], 1)
 
+    def test_first_baseline_sample_outlier(self):
+        for first in (-10., 10.):
+            wave = [first, 0.9, 1.1, 1., 2., 3., 4., 3., 2., 1.]
+            f = self.features([wave])
+            self.assertEqual(f["FirstBaselineSampleDropped"][0], 1)
+            self.assertEqual(f["InvalidBaseline"][0], 0)
+            self.assertAlmostEqual(f["BaselineEstimate"][0], 1.)
+            self.assertAlmostEqual(f["NoiseRMS"][0], np.sqrt(0.02))
+            self.assertAlmostEqual(f["PulseAmplitude"][0], 3.)
+            self.assertAlmostEqual(f["SignalArea"][0], 4.5)
+            self.assertAlmostEqual(f["PeakTime"][0], 3.)
+
+    def test_first_sample_filter_guards(self):
+        waves = [[0.9, 1., 1.1], [0., 1., 1.], [1., 1., 1.],
+                 [0., np.nan, 1.], [np.nan, 1., 1.], [0., 1.]]
+        f = waveform_features(batch(waves), (0, 3))
+        np.testing.assert_array_equal(f["FirstBaselineSampleDropped"],
+                                      [0, 1, 0, 0, 0, 0])
+        np.testing.assert_array_equal(f["InvalidBaseline"], [0, 0, 0, 1, 1, 1])
+        self.assertEqual(f["BaselineEstimate"][1], 1.)
+        self.assertEqual(f["NoiseRMS"][1], 0.)
+        for window in ((0, 2), (1, 4)):
+            f = waveform_features(batch([[0., 10., 1., 1.]]), window)
+            self.assertEqual(f["FirstBaselineSampleDropped"][0], 0)
+            self.assertAlmostEqual(f["BaselineEstimate"][0],
+                                   np.mean([0., 10., 1., 1.][slice(*window)]))
+
     def test_metadata_and_mpv(self):
         self.assertEqual(sample_period_ns({b"sampling_frequency": b"6400 MS/s"}), 0.15625)
         self.assertEqual(sample_period_ns({}, 0.25), 0.25)

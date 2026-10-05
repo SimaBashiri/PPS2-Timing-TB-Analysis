@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 
 
 DEFAULT_INPUT = Path(
-    "./TestBeam/2025-05-14/SAMPIC_data/"
+    "/GPT6/shared1/sbashiri/TestBeam/2025-05-14/SAMPIC_data/"
     "Run018_SAMPIC_5_17_2025_23h_13min_Binary"
 )
 
@@ -86,12 +86,36 @@ def waveform_features(batch, baseline_window=None, signal_window=None, polarity=
     if baseline_window is not None:
         start, stop = baseline_window
         quiet = (positions >= start) & (positions < stop)
+        first_dropped = np.zeros(len(batch), dtype=bool)
+        if start == 0 and stop >= 3:
+            # Judge sample zero independently so it cannot inflate its own
+            # reference noise. Only use complete, finite reference windows.
+            reference = quiet & (positions > 0)
+            rp, rv = parents[reference], values[reference]
+            rn = np.bincount(rp, minlength=len(batch))
+            reference_mean = np.zeros(len(batch))
+            np.divide(np.bincount(rp, weights=rv, minlength=len(batch)), rn,
+                      out=reference_mean, where=rn > 0)
+            reference_variance = np.zeros(len(batch))
+            np.divide(np.bincount(rp, weights=(rv - reference_mean[rp])**2,
+                                  minlength=len(batch)), rn - 1,
+                      out=reference_variance, where=rn > 1)
+            first = positions == 0
+            fp, fv = parents[first], values[first]
+            # A numerical floor avoids rejecting roundoff in flat baselines.
+            tolerance = 16 * np.finfo(float).eps * np.maximum(
+                np.abs(fv), np.abs(reference_mean[fp]))
+            first_dropped[fp] = (rn[fp] == stop - 1) & (
+                np.abs(fv - reference_mean[fp]) > np.maximum(
+                    5 * np.sqrt(reference_variance[fp]), tolerance))
+            quiet &= ~((positions == 0) & first_dropped[parents])
         qparents, qvalues = parents[quiet], values[quiet]
         n = np.bincount(qparents, minlength=len(batch))
         total = np.bincount(qparents, weights=qvalues, minlength=len(batch))
         pedestal = np.full(len(batch), np.nan)
-        # Require every sample in the requested baseline interval to be valid.
-        complete = n == stop - start
+        # All requested samples except a deliberately rejected first sample
+        # must still exist and be finite.
+        complete = (n == stop - start - first_dropped.astype(int)) & (n >= 2)
         np.divide(total, n, out=pedestal, where=complete)
         residuals = qvalues - pedestal[qparents]
         sumsq = np.bincount(qparents, weights=residuals**2, minlength=len(batch))
@@ -118,6 +142,7 @@ def waveform_features(batch, baseline_window=None, signal_window=None, polarity=
             "PulseAmplitude": np.where(amplitude > 0, amplitude, np.nan),
             "SNR": snr,
             "InvalidBaseline": (~complete).astype(int),
+            "FirstBaselineSampleDropped": first_dropped.astype(int),
         })
         if period_ns is not None:
             result.update(pulse_features(
@@ -281,6 +306,8 @@ def inspect_and_analyze(parquet_path, inspect_only=False, step_size=100_000,
         ax.set_xlabel(name + (f" ({feature_unit(name)})" if feature_unit(name) else ""))
         ax.set_ylabel("Fraction of valid hits / bin")
         ax.set_title(f"{name} by channel")
+        span = edges[name][-1] - edges[name][0]
+        ax.set_xlim(edges[name][0] - 0.03 * span, edges[name][-1] + 0.03 * span)
         ax.legend(fontsize=8)
         ax.grid(alpha=0.25)
         fig.tight_layout()
@@ -378,7 +405,41 @@ def main():
                         help="Fractions of baseline-subtracted peak, in percent (default: 10 through 90)")
     parser.add_argument("--thresholds-volts", nargs="+", type=float, default=(),
                         help="Optional fixed thresholds above baseline, in polarity-corrected V")
+    parser.add_argument("--timing", action="store_true", help="Also fit coincidence timing and calibrate channel delays")
+    parser.add_argument("--timing-only", action="store_true", help="Run timing analysis without waveform histograms")
+    parser.add_argument("--timing-channels", nargs="+", type=int, help="Channels to compare (default: all)")
+    parser.add_argument("--reference-channel", type=int, help="Zero-delay channel (default: lowest selected)")
+    parser.add_argument("--cfd-percent", type=float, default=50)
+    parser.add_argument("--coincidence-window-ns", type=float, default=30)
+    parser.add_argument("--timing-bin-width-ns", type=float, default=0.02)
+    parser.add_argument("--timing-fit-window-ns", type=float, default=1)
+    parser.add_argument("--timing-sigma-max-ns", type=float, default=0.5)
+    parser.add_argument("--timing-min-counts", type=int, default=50)
+    parser.add_argument("--timing-min-amplitude", type=float, default=0, help="Minimum pulse amplitude in V")
+    parser.add_argument("--timing-min-snr", type=float, default=0)
     args = parser.parse_args()
+    if args.timing or args.timing_only:
+        if args.inspect_only or args.baseline_window is None:
+            parser.error("Timing requires --baseline-window and cannot be combined with --inspect-only")
+        if not np.isfinite(args.cfd_percent) or not 0 < args.cfd_percent < 100:
+            parser.error("--cfd-percent must be between 0 and 100")
+        for name in ("coincidence_window_ns", "timing_bin_width_ns", "timing_fit_window_ns", "timing_sigma_max_ns"):
+            if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+                parser.error(f"--{name.replace('_', '-')} must be finite and positive")
+        for name in ("timing_min_amplitude", "timing_min_snr"):
+            if not np.isfinite(getattr(args, name)) or getattr(args, name) < 0:
+                parser.error(f"--{name.replace('_', '-')} must be finite and nonnegative")
+        if args.timing_min_counts < 5:
+            parser.error("--timing-min-counts must be at least 5")
+        if args.timing_bin_width_ns >= args.timing_sigma_max_ns:
+            parser.error("Timing bin width must be smaller than the maximum fitted sigma")
+        if args.timing_fit_window_ns >= args.coincidence_window_ns:
+            parser.error("Timing fit window must be smaller than the coincidence window")
+        if args.timing_channels is not None:
+            if len(set(args.timing_channels)) < 2:
+                parser.error("Select at least two timing channels")
+            if args.reference_channel is not None and args.reference_channel not in args.timing_channels:
+                parser.error("Reference channel must be in --timing-channels")
     if args.sample_period_ns is not None and (not np.isfinite(args.sample_period_ns) or args.sample_period_ns <= 0):
         parser.error("--sample-period-ns must be finite and positive")
     if any(not np.isfinite(v) or not 0 < v < 100 for v in args.thresholds_percent):
@@ -417,10 +478,24 @@ def main():
         else:
             output = args.output or default_output
             parquet_path = decode_to_parquet(source, output.resolve())
-    inspect_and_analyze(parquet_path, args.inspect_only, args.step_size,
-                        args.plots_dir, args.bins, args.baseline_window,
-                        args.signal_window, args.polarity, args.sample_period_ns,
-                        args.thresholds_percent, args.thresholds_volts)
+    if not args.timing_only:
+        inspect_and_analyze(parquet_path, args.inspect_only, args.step_size,
+                            args.plots_dir, args.bins, args.baseline_window,
+                            args.signal_window, args.polarity, args.sample_period_ns,
+                            args.thresholds_percent, args.thresholds_volts)
+    if args.timing or args.timing_only:
+        from timing_analysis import analyze_timing
+        output_dir = args.plots_dir or Path.cwd() / "plots" / parquet_path.stem
+        analyze_timing(
+            parquet_path, output_dir / "timing", waveform_features,
+            baseline_window=args.baseline_window, signal_window=args.signal_window,
+            polarity=args.polarity, period_ns=args.sample_period_ns,
+            channels=args.timing_channels, reference=args.reference_channel,
+            fraction=args.cfd_percent, window=args.coincidence_window_ns,
+            bin_width=args.timing_bin_width_ns, fit_window=args.timing_fit_window_ns,
+            sigma_max=args.timing_sigma_max_ns, min_counts=args.timing_min_counts,
+            min_amplitude=args.timing_min_amplitude, min_snr=args.timing_min_snr,
+            step_size=args.step_size)
 
 
 if __name__ == "__main__":
