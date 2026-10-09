@@ -15,8 +15,9 @@ import pyarrow.parquet as pq
 
 
 DEFAULT_INPUT = Path(
-    "/GPT6/shared1/sbashiri/TestBeam/2025-05-14/SAMPIC_data/"
-    "Run018_SAMPIC_5_17_2025_23h_13min_Binary"
+    # "/GPT6/shared1/sbashiri/TestBeam/2025-05-14/SAMPIC_data/"
+    # "Run018_SAMPIC_5_17_2025_23h_13min_Binary"
+    "/GPT6/shared1/sbashiri/TestBeam/2026-08/SAMPIC/sampic_20260805_013030_run1"
 )
 
 
@@ -28,9 +29,10 @@ def decode_to_parquet(source, output):
             f"Output already exists: {output}. Pass that Parquet file as input to inspect it."
         )
     decoder = SAMPIC_Run_Decoder(source if source.is_dir() else source.parent)
-    if source.is_dir():
-        decoder.run_files = sorted(path for path in source.glob("*.bin*") if path.is_file())
-    elif source.is_file():
+    # Preserve the decoder's natural ordering and exclusion of trigger-data
+    # binaries, which do not use the hit-record header format.
+    decoder.run_files = [path for path in decoder.run_files if path.is_file()]
+    if source.is_file():
         if source not in decoder.run_files:
             raise ValueError(f"Not a SAMPIC hit binary: {source}")
         decoder.run_files = [source]
@@ -42,6 +44,18 @@ def decode_to_parquet(source, output):
     decoder.decode_data(parquet_path=output)
     if not output.is_file():
         raise RuntimeError("The decoder did not produce a Parquet file.")
+    return output
+
+
+def parquet_output_path(source, output):
+    """Resolve an output file or directory to the Parquet file for this run."""
+    output = output.expanduser()
+    # Accept a directory (including a not-yet-created directory such as ./data)
+    # as the output destination, as in DecodeFiles.ipynb. A .parquet/.pq path
+    # remains an explicit filename.
+    if output.is_dir() or output.suffix.lower() not in {".parquet", ".pq"}:
+        run_name = source.name if source.is_dir() else source.stem
+        output = output / f"{run_name}.parquet"
     return output
 
 
@@ -389,7 +403,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", nargs="?", type=Path, default=DEFAULT_INPUT,
                         help="SAMPIC run directory, single .bin file, or existing Parquet file")
-    parser.add_argument("--output", type=Path, help="New Parquet output path (never overwritten)")
+    parser.add_argument("--output", type=Path,
+                        help="Output directory (writes <run>.parquet) or explicit .parquet filename")
     parser.add_argument("--inspect-only", action="store_true", help="Print structure without analysis")
     parser.add_argument("--step-size", type=int, default=100_000, help="Hits per analysis batch")
     parser.add_argument("--plots-dir", type=Path, help="Plot directory (default: ./plots/<run>)")
@@ -470,20 +485,31 @@ def main():
             parser.error("--output is only used when decoding binaries")
         parquet_path = source
     else:
-        default_output = (source / f"{source.name}.parquet" if source.is_dir()
+        default_output = (Path("./data") / f"{source.name}.parquet" if source.is_dir()
                           else source.with_suffix(".parquet"))
         if args.output is None and default_output.is_file():
             parquet_path = default_output
             print(f"Using existing Parquet: {parquet_path}")
         else:
-            output = args.output or default_output
+            output = parquet_output_path(source, args.output) if args.output else default_output
             parquet_path = decode_to_parquet(source, output.resolve())
+    schema_names = set(pq.ParquetFile(parquet_path).schema_arrow.names)
+    has_waveforms = {"DataSample", "DataSize", "Baseline"}.issubset(schema_names)
     if not args.timing_only:
-        inspect_and_analyze(parquet_path, args.inspect_only, args.step_size,
-                            args.plots_dir, args.bins, args.baseline_window,
-                            args.signal_window, args.polarity, args.sample_period_ns,
-                            args.thresholds_percent, args.thresholds_volts)
+        if has_waveforms or args.inspect_only:
+            inspect_and_analyze(parquet_path, args.inspect_only, args.step_size,
+                                args.plots_dir, args.bins, args.baseline_window,
+                                args.signal_window, args.polarity, args.sample_period_ns,
+                                args.thresholds_percent, args.thresholds_volts)
+        else:
+            missing = sorted({"DataSample", "DataSize", "Baseline"} - schema_names)
+            print("Skipping waveform plots; this compact-mode Parquet lacks "
+                  f"waveform fields: {missing}")
     if args.timing or args.timing_only:
+        if not has_waveforms:
+            print("Skipping CFD timing analysis; it requires waveform samples to "
+                  "calculate constant-fraction times.")
+            return
         from timing_analysis import analyze_timing
         output_dir = args.plots_dir or Path.cwd() / "plots" / parquet_path.stem
         analyze_timing(
